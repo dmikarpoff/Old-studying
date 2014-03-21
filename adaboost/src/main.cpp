@@ -1,0 +1,297 @@
+#include "../include/utils.hpp"
+#include "../include/lbph.hpp"
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/objdetect/objdetect.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <iostream>
+
+Ptr<LBPHm> model = new LBPHm();
+CascadeClassifier face_cascade;
+
+int main( int argc, const char** argv )
+{
+    if (argc < 2)
+    {
+        help();
+        return 0;
+    }   
+
+    if (!strcmp(argv[1], "-c"))
+    {
+        CvCapture* capture;
+        capture = cvCreateCameraCapture( -1 );
+        cvSetCaptureProperty( capture, CV_CAP_PROP_FRAME_WIDTH, 1279);
+        cvSetCaptureProperty( capture, CV_CAP_PROP_FRAME_HEIGHT, 1024);
+
+        model->load(argv[2]);
+        Mat frame;
+
+        String face_cascade_name = "lbpcascade_frontalface.xml";
+        if( !face_cascade.load( face_cascade_name ) ){ printf("--(!)Error loading\n"); return -1; };
+
+        if (capture)
+        {
+            while( true )
+            {
+                detectAndDisplay( cvQueryFrame( capture ) ); 
+                int c = waitKey(10);
+                if((char)c == 'c') break; 
+            }
+        }
+    } else 
+        if (!strcmp(argv[1], "-l") || !strcmp(argv[1], "-o"))
+        {
+            vector<Triple> triples;
+            read_csv(triples); 
+            std::cout << "images loaded" << std::endl;
+            std::random_shuffle(triples.begin(), triples.end());
+
+            bool evo = true;
+            if (!strcmp(argv[1], "-l"))
+            {
+                model->boost(triples, 0.8, true);
+                model->save(argv[2]);
+                if(evo) 
+                    model->evoboost(triples, 0.8);
+            } else 
+                model->load(argv[2]);
+            int lbl = 0;
+            int lbr = 0;
+            int mislbl = 0;
+            int mislbr = 0;
+            vector<int> err(100, 0);
+            vector<int> erre(100, 0);
+
+#if 1
+            //#pragma omp parallel for
+            std::cout << evo << std::endl;
+            std::cout << "Evo started" << std::endl;
+            for (int i = 0; i < (int)triples.size()*0.8; i++)
+            {
+   //             if (i % 100 == 0)
+                    std::cout << i << std::endl;
+                vector<int> lb = model->weakpredictor(triples[i].img);
+                vector<int> lbe;
+                if (evo)
+				     lbe = model->evopredictor(triples[i].img);
+                for (int j = 0; j < lb.size(); j++)
+                    if (lb[j] != triples[i].label)
+                        err[j]++;
+                if (evo)      
+					for (int j = 0; j < lbe.size(); j++)
+		                if (lbe[j] != triples[i].label)
+		                    erre[j]++;
+
+            }
+            for (int i = 0; i < err.size(); i++)
+            {
+                std::cout << "set error rate " << (double)err[i] / (int)(triples.size() * 0.8) << std::endl;
+            }
+
+            if (evo)
+                for (int i = 0; i < erre.size(); i++)
+                {
+                    if (erre[i] > 0)
+                        std::cout << "set evolutional error rate " << (double)erre[i] / (int)(triples.size() * 0.8) << std::endl;
+                }
+
+            err = vector<int>(100,0);
+            erre = vector<int>(100,0);
+#endif
+
+#pragma omp parallel for
+            for (auto it = triples.begin() + triples.size()*0.8; it < triples.end(); it++)
+            {
+                vector<int> lb = model->weakpredictor(it->img);
+                vector<int> lbe;
+                for (int j = 0; j < lb.size(); j++)
+                    if (lb[j] != it->label)
+                        err[j]++;
+
+                if (evo)
+                {
+                    lbe = model->evopredictor(it->img);
+                    for (int j = 0; j < lbe.size(); j++)
+                        if (lb[j] != it->label)
+                            erre[j]++;
+                }
+            }
+            char b[100];
+            sprintf(b, "%d", rand());
+
+            for (int i = 0; i < err.size(); i++)
+            {
+                if (err[i] > 0)
+                    std::cout << "error rate " << (double)err[i] / (int)(triples.size() * 0.2) << std::endl;
+                if ((double) err[i] / (int)(triples.size() * 0.2) < 0.1 && (double) err[i] / (int)(triples.size() * 0.2) > 0)
+                    model->save(b);
+            }
+
+            char d[100];
+            sprintf(d, "e%d", rand());
+
+            if (evo)
+                for (int i = 0; i < erre.size(); i++)
+                {
+                    if (erre[i] > 0)
+                        std::cout << "evolutional error rate " << (double)erre[i] / (int)(triples.size() * 0.2) << std::endl;
+                    if ((double) erre[i] / (int)(triples.size() * 0.2) < 0.1 && (double) erre[i] / (int)(triples.size() * 0.2) > 0)
+                    {
+                        model->saveevo(d);
+                    }
+                }
+
+
+        } else if (!strcmp(argv[1], "-p"))
+        {
+            String face_cascade_name = "lbpcascade_frontalface.xml";
+            if( !face_cascade.load( face_cascade_name ) ){ printf("--(!)Error loading\n"); return -1; };
+            model->load(argv[2]);
+            detectAndDisplay(imread(argv[3]));
+            waitKey();
+        }
+
+    return 0;
+}
+
+vector<Point2f> points[2];
+Mat previmg;
+vector<vector<Point2f> > personpoints;
+int oldfsize = 0;
+Mat prev_gray;
+bool init = false;
+int ll = 0;
+vector<Face> facelist;
+int Face::ids = 0;
+
+void detectAndDisplay(Mat&& frame)
+{
+    std::vector<Rect> faces(0);
+    Mat frame_gray;
+    cvtColor( frame, frame_gray, CV_BGR2GRAY );
+    face_cascade.detectMultiScale( frame_gray, faces, 1.1, 7, 0, Size(80, 80) );
+
+    if (facelist.empty())
+    {
+        for (const Rect &f : faces)
+            facelist.push_back(f);
+    } else if (facelist.size() < faces.size()) {
+        vector<bool> used(faces.size(), false); 
+        for (Face &f : facelist)
+        {
+            double rec = 50000;
+            int index = -1;
+            for (int i = 0; i < faces.size(); i++)
+            {
+                double d = dist(f.r, faces[i]);
+                if (d < rec && !used[i])
+                {
+                    rec = d;
+                    index = i;
+                }
+            }
+            if(rec < 50)
+            {
+                used[index] = true;
+                f.r = faces[index];
+                f.duration++;
+            }
+
+        }
+        for (int i = 0; i < faces.size(); i++)
+            if (!used[i])
+                facelist.push_back(faces[i]);
+    } else {
+        for (Face &f : facelist)
+            f.available = true;
+        for (int i = 0; i < faces.size(); i++)
+        {
+            double rec = 50000;
+            int index = -1;
+            for (int j = 0; j < facelist.size(); j++)
+            {
+                double d = dist(faces[i], facelist[j].r);
+                if (d < rec && facelist[j].available)
+                {
+                    rec = d;
+                    index = j;
+                }
+            }
+            if (rec < 50)
+            {
+                facelist[index].available = false; 
+                facelist[index].r = faces[i]; 
+                facelist[index].timer = 50;
+                facelist[index].duration++;
+            }
+        }
+    }
+
+    for (Face & f : facelist)
+        if (f.available)
+            f.timer--;
+
+    for (auto it = facelist.begin(); it < facelist.end(); it++)
+        if (it->timer < 0)
+            facelist.erase(it);
+
+    for (const Face& f : facelist)
+    {
+        int pos_x = std::max(f.r.x + 10, 0);
+        int pos_y = std::max(f.r.y - 25, 0); // And now put it into the image:
+        char d[100];
+        sprintf(d, "person #%d, duration %.2f sec", f.id, f.duration / (double)25);
+        putText(frame, d, Point(pos_x, pos_y), FONT_HERSHEY_PLAIN, 1.0, CV_RGB(0,255,0), 2.0);
+        Point center( f.r.x + f.r.width*0.5, f.r.y + f.r.height*0.5 );
+        ellipse( frame, center, Size( f.r.width*0.5, f.r.height*0.5), 0, 0, 360, Scalar( 0, 0, 255 ), 1, 4, 0 );
+    }
+
+    for (auto it = faces.begin(); it < faces.end(); it++)
+    {
+        Mat faceROI = frame_gray(*it);
+        equalizeHist(faceROI, faceROI);
+        resize(faceROI, faceROI, Size(120, 120));
+        faceROI = faceROI(Rect(20, 30, 80, 80));
+
+        int prediction;// = 0;
+        for (Face& f : facelist)
+            if (f.r == *it)
+            {
+                if (f.duration < 100)
+                {
+                    prediction = model->fastpredictor(faceROI);
+                    if (prediction)
+                        f.male++;
+                    else f.female++;
+                }
+                /*{
+                    std::vector<int> pred = model -> evopredictor(faceROI);
+                    for (int i = 0; i < pred.size(); ++i)
+                        if (pred[i])
+                            f.male++;
+                        else
+                            f.female++;
+                    std::cout << "Male: " << f.male << std::endl;
+                    std::cout << "Female: " << f.female << std::endl;
+                }*/
+                string gender;
+//               if (f.duration >= 0)
+//				{
+                    if (f.male > f.female) gender = "male"; else gender = "female";
+//				}
+//                else gender = "computing gender";
+                string box_text = gender;
+                int pos_x = std::max(it->tl().x - 10, 0);
+                int pos_y = std::max(it->tl().y - 10, 0);
+                putText(frame, box_text, Point(pos_x, pos_y), FONT_HERSHEY_PLAIN, 1.0, CV_RGB(0,255,0), 2.0);
+                break;
+            }
+        Point center( it->x + it->width*0.5, it->y + it->height*0.5 );
+        ellipse( frame, center, Size(it->width*0.5, it->height*0.5), 0, 0, 360, Scalar( 255, 0, 0 ), 2, 8, 0 );
+        imshow("face", faceROI);
+    } 
+//	Mat  dest = CreateImage( cvSize((int)(source->width/4), (int)(source/4)), source->depth, source->nChannels );
+	resize(frame, frame, Size(0, 0), 0.5, 0.5);
+    imshow("Capture - Face detection", frame);
+}

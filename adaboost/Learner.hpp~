@@ -1,0 +1,15 @@
+#ifndef LEARNER_H
+
+#define LEARNER_H
+
+#include <fstream>
+
+class Learner{
+public:
+	Learner(const std::string&);
+	bool learn();
+private:
+	std::string data_info;
+};
+
+#endif

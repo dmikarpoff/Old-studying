@@ -1,0 +1,11 @@
+#include "Learner.hpp"
+
+Learner::Learner(const std::string& name)
+{
+	data_info = name;
+}
+
+bool load()
+{
+	return false;
+}

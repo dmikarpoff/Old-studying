@@ -1,0 +1,258 @@
+#include "../include/weakctor.hpp"
+#include <algorithm>
+#include <cstdio>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <opencv2/highgui/highgui.hpp>
+
+
+double WeakCtor::chisquare(const Mat& sample) const 
+{
+  double res = 0;
+  for (int i = 0; i < sample.cols; i++)
+    if (sample.at<float>(0, i) != 0 || mean.at<float>(0, i) != 0)
+      res += std::pow((sample.at<float>(0, i) - mean.at<float>(0, i)), 2) / (mean.at<float>(0, i) + sample.at<float>(0, i));
+  return res; 
+}
+
+double WeakCtor::calcMean(int label, const vector<double>& chisq)
+{
+  double m = 0;
+  int counter = 0;
+  for (int i = 0; i < size; i++)
+    if (label == labels[i]) 
+    {
+      m += chisq[i];
+      counter++;
+    }
+  m /= counter;
+  return m;
+}
+
+double WeakCtor::calcDisp(int label, const vector<double> &chisq, double meanv)
+{
+  double m = 0;
+  int counter = 0;
+  for (int i = 0; i < size; i++)
+    if (label == labels[i]) 
+    {
+      m += (chisq[i] - meanv)*(chisq[i] - meanv);
+      counter++; 
+    }
+  m /= counter;
+
+  return m;
+}
+
+double WeakCtor::meanDeriv(int label, int bin)
+{
+  double m = 0;
+  int counter = 0;
+  for (int i = 0; i < size; i++)
+    if (label == labels[i])
+      if (samples[i].at<float>(0, bin) != 0 || mean.at<float>(0, bin) != 0)
+      {
+        m += -4*std::pow((samples[i]).at<float>(0, bin), 2) / std::pow((samples[i]).at<float>(0, bin) + mean.at<float>(0, bin), 2) + 1;
+        counter++;
+      }
+
+  m /= counter;
+  return m;
+}
+
+double WeakCtor::dispDeriv(int label, int bin, const vector<double> &chisq, double meanv, double meanderiv)
+{
+  double m = 0;
+  int counter = 0;
+  for (int i = 0; i < size; i++)
+    if (label == labels[i])
+    if (samples[i].at<float>(0, bin) != 0 || mean.at<float>(0, bin) != 0)
+    {
+      m += (-4*std::pow((samples[i]).at<float>(0, bin), 2) / std::pow((samples[i]).at<float>(0, bin) + mean.at<float>(0, bin), 2) + 1 - meanderiv) * (chisq[i] - meanv);
+      counter++;
+    }
+
+  m /= counter;
+  m *= 2;
+  return m;
+} 
+
+double WeakCtor::fdrDeriv(int bin, const vector<double>& chisq)
+{
+  double mean0 = calcMean(0, chisq);
+  double mean1 = calcMean(1, chisq);
+  double disp0 = calcDisp(0, chisq, mean0);
+  double disp1 = calcDisp(1, chisq, mean1);
+  double meanderiv0 = meanDeriv(0, bin);
+  double meanderiv1 = meanDeriv(1, bin);
+  double dispderiv0 = dispDeriv(0, bin, chisq, mean0, meanderiv0); 
+  double dispderiv1 = dispDeriv(1, bin, chisq, mean1, meanderiv1); 
+
+  double m = 2 * (mean1 - mean0) / (disp1 + disp0) * (meanderiv1 - meanderiv0) - std::pow((mean1 - mean0) / (disp1 + disp0), 2) * (dispderiv1 + dispderiv0);
+  return m;
+}
+
+void WeakCtor::findOptimal()
+{
+  double lambda = 0.001;
+  double minderiv = DBL_MAX;
+  int iteration = 0;
+  vector<double> chisq = chisquares(samples);
+  double fdr0 = fdr(chisq);
+  double oldfdr = 0;
+//  std::cout << "w" << std::endl;
+  while ((fdr0 - oldfdr) > 1 && iteration < 100)
+  {
+    oldfdr = fdr0;
+    for (int i = 0; i < mean.cols; i++)
+    {
+      double deriv = fdrDeriv(i, chisq);
+        if (mean.at<float>(0, i) + lambda*deriv >=0)
+          mean.at<float>(0, i) += lambda*deriv;
+    }
+    chisq = chisquares(samples);
+    fdr0 = fdr(chisq);
+ //   std::cout << fdr0 << " " << oldfdr << std::endl;
+    iteration++;
+  }
+  
+//  std::cout << std::endl;
+}
+
+vector<double> WeakCtor::calcLUThist(int label)
+{
+  vector<double> dists(0);
+  for (int i = 0; i < size; i++)
+    if (labels[i] == label)
+      dists.push_back(chisquare(samples[i]));
+
+  double max = *std::max_element(dists.begin(), dists.end());
+//  std::for_each(dists.begin(), dists.end(), [max](double & val) { return val /= max; });
+  vector<double> luthist(32, 0.0);
+  maxdist = max;
+  for (int i = 0; i < dists.size(); i++)
+  {
+    dists[i] /= max;
+    luthist[(int)(dists[i] * 32)]++;
+  }
+
+  for (int i = 0; i < luthist.size(); i++)
+    luthist[i] /= dists.size();
+  return luthist;
+}
+
+void WeakCtor::saveHist()
+{
+  std::ofstream file("lut.txt");
+  file << mean;
+  file.close();
+}
+
+vector<double> WeakCtor::chisquares (const vector<Mat> & samples)
+{
+  vector<double> res(size, 0);
+  for (int i = 0; i < size; i++)
+      res[i] = chisquare(samples[i]);
+  return res;
+}
+
+void WeakCtor::meanHist()
+{
+  int last = 0;
+  int count = 1;
+//  std::cout << size << " ";
+  for (int i = 0; i < size; i++)
+    if (labels[i] == 1)
+    {
+      mean = samples[i].clone();
+      last = i + 1;
+      i = size;
+      break;
+    }
+  for (int i = last; i < size; i++)
+    if (labels[i] == 1)
+    {
+      mean = mean + samples[i].clone();
+      count++;
+//      std::cout << mean << std::endl << std::endl;
+    }
+  mean = mean / count;
+  vector<double> dists(size);
+ }
+
+void WeakCtor::loadFeature(const vector<Mat> &_samples, const WeakParams &p)
+{
+  samples = _samples;
+  params = p;
+  meanHist();
+  findOptimal();
+  lutpos = calcLUThist(1);
+  lutneg = calcLUThist(0);
+
+ // for (int i = 0; i < lutpos.size(); i++)
+ //   std::cout << lutpos[i] << " ";
+  //drawLut();
+}
+
+double WeakCtor::classify(const Mat& mat) const
+{
+  double dist = chisquare(mat);
+  int bin = (int)(dist / maxdist * 32);
+  double res = 1/2.0;
+  if (bin > 32) return res;
+  if (lutpos[bin] == lutneg[bin]) return 1/2.0;
+//  res = (lutpos[bin] + 0.001) / (lutneg[bin] + 0.001);
+//  std::cout << "pos: " << lutpos[bin] << " neg: " << lutneg[bin] << std::endl;
+//  res = ((std::log(res) / std::log(1001) + 1 )/ 2);
+//  return res;
+  if (lutpos[bin] > lutneg[bin]) return 1;
+  return 0;
+} 
+
+void WeakCtor::drawLut() const
+{
+  int hist_w = 640; int hist_h = 300;
+  int bin_w = cvRound( (double) hist_w/32);
+
+  //  std::cout << hist;
+  Mat histImage( hist_h, hist_w, CV_8UC3, Scalar( 255,255,255) );
+
+  /// Normalize the result to [ 0, histImage.rows ]
+
+  for( int i = 0; i < 32; i++ )
+  {
+    if (lutpos[i] > lutneg[i])
+    {
+      line( histImage, Point( bin_w*(i), hist_h) ,
+          Point( bin_w*(i), hist_h - hist_h*(lutpos[i]) ),
+          Scalar( 0, 255, 0), bin_w, 8, 0  );
+
+      line( histImage, Point( bin_w*(i), hist_h) ,
+          Point( bin_w*(i), hist_h - hist_h*(lutneg[i]) ),
+          Scalar( 0, 0, 255), bin_w, 8, 0  );
+    } else {
+      line( histImage, Point( bin_w*(i), hist_h) ,
+          Point( bin_w*(i), hist_h - hist_h*(lutneg[i]) ),
+          Scalar( 0, 0, 255), bin_w, 8, 0  );
+ 
+      line( histImage, Point( bin_w*(i), hist_h) ,
+          Point( bin_w*(i), hist_h - hist_h*(lutpos[i]) ),
+          Scalar( 0, 255, 0), bin_w, 8, 0  );
+   }
+  }
+ 
+  char b[100];
+  sprintf(b, "%d", rand());
+  imshow(b, histImage);
+  //  waitKey(0);
+}
+
+double WeakCtor::fdr(const vector<double> &chisq)
+{
+  double mean0 = calcMean(0, chisq);
+  double mean1 = calcMean(1, chisq);
+  double disp0 = calcDisp(0, chisq, mean0);
+  double disp1 = calcDisp(1, chisq, mean1);
+  return ((mean1-mean0) * (mean1-mean0)) / ((disp1*disp1) + (disp0*disp0));
+}
